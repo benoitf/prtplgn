@@ -8,21 +8,13 @@
  * SPDX-License-Identifier: EPL-2.0
  **********************************************************************/
 
-/**
- * Exposed server port of a workspace.
- */
-export interface WorkspacePort {
-    url: string;
-    portNumber: string;
-    serverName: string;
-    previewUrl?: PreviewUrl;
-    isSecured: boolean;
+import { Endpoint } from './endpoint';
+
+export interface CommandPreviewUrl {
+    port: number;
+    path?: string;
 }
 
-/**
- * Exposed server preview url configuration.
- */
-export interface PreviewUrl {
-    port: string;
-    path?: string;
+export interface DevfileHandler {
+    getEndpoints(): Promise<Array<Endpoint>>;
 }

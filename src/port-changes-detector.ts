@@ -9,10 +9,10 @@
 **********************************************************************/
 
 import { PortScanner, AbstractInternalScanner } from './port-scanner';
-import { Port } from './port';
+import { ListeningPort } from './listening-port';
 
 export interface PortCallback {
-    (port: Port): void;
+    (port: ListeningPort): void;
 }
 
 /**
@@ -22,12 +22,12 @@ export interface PortCallback {
 export class PortChangesDetector {
 
     private static readonly WAIT = 3000;
-    private openedPorts: Port[] = [];
+    private openedPorts: ListeningPort[] = [];
 
     private readonly portScanner: PortScanner;
 
-    private onDidOpenPorts: ((openPort: Port) => void)[] = [];
-    private onDidClosePorts: ((closedPort: Port) => void)[] = [];
+    private onDidOpenPorts: ((openPort: ListeningPort) => void)[] = [];
+    private onDidClosePorts: ((closedPort: ListeningPort) => void)[] = [];
 
     public onDidOpenPort(callback: PortCallback): void {
         this.onDidOpenPorts.push(callback);
@@ -49,6 +49,7 @@ export class PortChangesDetector {
     }
 
     public async monitor(): Promise<void> {
+
         // grab new port opened and compare
         const scanPorts = await this.portScanner.getListeningPorts();
 
@@ -72,7 +73,7 @@ export class PortChangesDetector {
 
     }
 
-    public getOpenedPorts() : Port[] {
+    public getOpenedPorts() : ListeningPort[] {
         return this.openedPorts;
     }
 
@@ -80,8 +81,6 @@ export class PortChangesDetector {
 
         // monitor
         await this.monitor();
-
-        // update 
 
         // start again check
         setTimeout(() => this.check(), PortChangesDetector.WAIT);

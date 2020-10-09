@@ -1,13 +1,11 @@
 import * as theia from '@theia/plugin';
-import { WorkspacePort } from './workspace-port';
-import { PortChangesDetector } from './port-changes-detector';
-import { BusyPort } from './ports-plugin';
-import { Port } from './port';
+import { Endpoint, EndpointExposure } from './endpoint';
+import { ListeningPort } from './listening-port';
 
-interface ITreeNodeItem {
+export interface ITreeNodeItem {
     id: string;
     name: string;
-    tooltip: string;
+    tooltip?: string;
     iconPath?: string;
     parentId?: string;
     command?: {
@@ -15,303 +13,144 @@ interface ITreeNodeItem {
         arguments?: any[]
     },
     isExpanded?: boolean;
+    contextValue?: string;
+    endpoint?: Endpoint;
 }
+
 
 export class EndpointsTreeDataProvider implements theia.TreeDataProvider<ITreeNodeItem> {
 
-    private static readonly LISTEN_ALL_IPV4 = '0.0.0.0';
-    private static readonly LISTEN_ALL_IPV6 = '::';
-    private static readonly SERVER_REDIRECT_PATTERN = 'theia-redirect-';
-    private static readonly PORT_PLUGIN_CANCEL_PORT_FORWARDING_COMMAND_ID = 'port-plugin-cancel-port-forwarding-command-id';
-
     private onDidChangeTreeDataEmitter: theia.EventEmitter<undefined>;
     private ids: string[];
-
-
     readonly onDidChangeTreeData: theia.Event<undefined>;
-
     private treeNodeItems: ITreeNodeItem[];
 
-    constructor(private portChangesDetector: PortChangesDetector, private workspacePorts: WorkspacePort[], private redirectListeners: Map<number, BusyPort>, private freeRedirectPort: (portNumber: number) => void) {
+    constructor() {
         this.treeNodeItems = [];
         this.onDidChangeTreeDataEmitter = new theia.EventEmitter<undefined>();
         this.onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
         this.ids = [];
-        this.init();
     }
 
-    init() {
-        const  handler = async (portNumber: number): Promise<void> => {
-            this.freeRedirectPort(portNumber);
-        }
-        theia.commands.registerCommand(EndpointsTreeDataProvider.PORT_PLUGIN_CANCEL_PORT_FORWARDING_COMMAND_ID, handler);
-    }
 
-    refresh() {
+    refresh(endpoints: Endpoint[], openedPorts: ListeningPort[]) {
         this.ids.length = 0;
         this.treeNodeItems.length = 0;
-        theia.window.showInformationMessage('Refreshing the ports...');
-
-        // create top level groups
-        const endpointsGroup = {
-            id: this.getRandId(),
-            iconPath: 'fa-plug',
-            name: 'Endpoints',
-            tooltip: 'Available Endpoints',
-            isExpanded: true
-        };
 
         const publicEndpointsGroup = {
             id: this.getRandId(),
+            name: 'Public',
             iconPath: 'fa-cloud',
-            name: 'Ports listening and remotely available',
-            tooltip: 'Remotely available',
-            parentId: endpointsGroup.id,
+            tooltip: 'Public endpoints referenced in the devfile',
             isExpanded: true
         };
         const privateEndpointsGroup = {
             id: this.getRandId(),
             iconPath: 'fa-circle',
-            name: 'Ports listening but private',
-            parentId: endpointsGroup.id,
-            tooltip: 'Available locally',
-            isExpanded: true
-        };
-        const offlineEndpointsGroup = {
-            id: this.getRandId(),
-            iconPath: 'fa-circle-thin',
-            name: 'offline',
-            parentId: endpointsGroup.id,
-            tooltip: 'Declared in devfile but not listening',
+            name: 'Private',
+            tooltip: 'Private endpoints (only available within workspace)',
             isExpanded: true
         };
 
-        this.treeNodeItems.push(endpointsGroup);
-        this.treeNodeItems.push(publicEndpointsGroup);
-        this.treeNodeItems.push(privateEndpointsGroup);
-        this.treeNodeItems.push(offlineEndpointsGroup);
+
+        // public endpoints are:
+        //  - the one defined in the devfile 
+        //  - and the current port forwarding
+        const publicEndpoints: Endpoint[] = endpoints.filter(endpoint => endpoint.exposure === EndpointExposure.DEVFILE_PUBLIC || endpoint.exposure === EndpointExposure.PORT_FORWARDING);
 
 
-        // ok now handle public listening ports
-        const openedPorts = this.portChangesDetector.getOpenedPorts();
-
-        // public port need to listen on all interfaces + be declared in workspace port
-        let publicPorts = openedPorts.filter(port => ((port.interfaceListen === EndpointsTreeDataProvider.LISTEN_ALL_IPV4 || port.interfaceListen === EndpointsTreeDataProvider.LISTEN_ALL_IPV6) || (this.workspacePorts.some(workspacePort => workspacePort.isSecured && workspacePort.portNumber === `${port.portNumber}`))) );
-        publicPorts = publicPorts.filter(port => this.workspacePorts.some(workspacePort => (workspacePort.portNumber === `${port.portNumber}`)));
-
-        publicPorts.sort((a: Port, b: Port) => {
-            return a.portNumber - b.portNumber
+        publicEndpoints.sort((ep1: Endpoint, ep2: Endpoint) => {
+            return ep1.name.localeCompare(ep2.name);
         })
-        publicPorts.forEach(port => {
 
-            let portListening = port.portNumber;
-            let redirectName;
-            Array.from(this.redirectListeners.keys()).forEach(redirectPort => {
-                const busyPort = this.redirectListeners.get(redirectPort);
-                if (busyPort && busyPort.workspacePort.portNumber === port.portNumber.toString()) {
-                    theia.window.showInformationMessage('found redirect port' + redirectPort);
-                    portListening = redirectPort;
-                    redirectName = `User Port Forwarding(${redirectPort}->${busyPort.workspacePort.portNumber})`
-                }
-            })
+        publicEndpoints.forEach(endpoint => {
 
-            const portListeningNode: ITreeNodeItem = {
-                id: this.getRandId(),
-                name: `Port ${portListening}`,
-                tooltip: 'Port listening '
-            };
-            portListeningNode.iconPath = 'fa-cloud medium-green';
-            portListeningNode.tooltip = 'This port is listening and is available remotely';
-            portListeningNode.parentId = publicEndpointsGroup.id;
-            this.treeNodeItems.push(portListeningNode);
-
-            let needExpand = false;
-            
-            // links ?
-            const foundWorkspacePort = this.workspacePorts.find(workspacePort => workspacePort.portNumber === `${port.portNumber}`);
-            if (foundWorkspacePort && foundWorkspacePort.url.startsWith('http')) {
-                needExpand = true;
-
-                let serverName;
-                if (redirectName) {
-                    serverName = redirectName;
-                } else {
-                    serverName = foundWorkspacePort.serverName;
-                }
-                const openNewTabNode: ITreeNodeItem = {
-                    id: this.getRandId(),
-                    parentId: portListeningNode.id,
-                    name: `${serverName} (new tab)`,
-                    iconPath: 'fa-external-link medium-blue',
-                    command: { id: 'theia.open', arguments: [foundWorkspacePort.url] },
-                    tooltip: 'open in a new tab'
-                };
-                this.treeNodeItems.push(openNewTabNode);
-
-                const openPreviewTabNode: ITreeNodeItem = {
-                    id: this.getRandId(),
-                    parentId: portListeningNode.id,
-                    name: `${serverName} (preview)`,
-                    iconPath: 'fa-eye medium-blue',
-                    command: { id: 'theia.open', arguments: [foundWorkspacePort.url] },
-                    tooltip: 'open in preview  '
-                };
-                this.treeNodeItems.push(openPreviewTabNode);
-            
-                if (redirectName) {
-                    const cancelPortForwardingNode: ITreeNodeItem = {
-                    id: this.getRandId(),
-                    parentId: portListeningNode.id,
-                    name: `Cancel port forwarding`,
-                    iconPath: 'fa-stop-circle-o medium-red',
-                    command: { id: EndpointsTreeDataProvider.PORT_PLUGIN_CANCEL_PORT_FORWARDING_COMMAND_ID, arguments: [portListening] },
-                    tooltip: 'Cancel redirect (make port private again)'
-                };
-                this.treeNodeItems.push(cancelPortForwardingNode);
-            }
-            }
-            if (needExpand) {
-                portListeningNode.isExpanded = true;
+            let targetPort = endpoint.targetPort;
+            let displayName;
+            if (endpoint.exposure === EndpointExposure.PORT_FORWARDING) {
+                displayName = endpoint.name;
             } else {
-                portListeningNode.name = `${portListeningNode.name} (no http endpoints)`
+                displayName = `${endpoint.name} (${targetPort}/${endpoint.protocol})`;
             }
 
+            const publicEndpointNode: ITreeNodeItem = {
+                id: this.getRandId(),
+                name: displayName
+            };
+            const isOnline = openedPorts.some(listeningPort => listeningPort.portNumber === targetPort);
+            if (isOnline) {
+                publicEndpointNode.iconPath = 'fa-cloud medium-green';
+                publicEndpointNode.tooltip = 'Public Port';
+                if (endpoint.url.startsWith('https://')) {
+                    publicEndpointNode.contextValue = "publicHttpsEndpointOnline";
+                } else {
+                    publicEndpointNode.contextValue = "publicPortOnline";
+                }
+            } else {
+                publicEndpointNode.iconPath = 'fa-circle-thin medium-grey';
+                publicEndpointNode.tooltip = 'Public Port offline';
+                publicEndpointNode.contextValue = "publicDevfilePortOffline";
+            }
+            publicEndpointNode.parentId = publicEndpointsGroup.id;
 
+            // add endpoint inside the node
+            publicEndpointNode.endpoint = endpoint;
+
+
+            this.treeNodeItems.push(publicEndpointNode);
         });
 
 
-        // workspace port is inside 
-        let offlinePorts = this.workspacePorts.filter(workspacePort => !openedPorts.some(openedPort => (openedPort.portNumber.toString() === workspacePort.portNumber)));
-        // exclude redirect ports
-        offlinePorts = offlinePorts.filter(workspacePort => !workspacePort.serverName.startsWith(EndpointsTreeDataProvider.SERVER_REDIRECT_PATTERN));
-        
-        // sort
-        offlinePorts.sort((a: WorkspacePort, b: WorkspacePort)=> {
-            return parseInt(a.portNumber) - parseInt(b.portNumber);
+        const privateEndpoints: Endpoint[] = endpoints.filter(endpoint => (endpoint.exposure === EndpointExposure.DEVFILE_PRIVATE || endpoint.exposure === EndpointExposure.USER));
+
+        // now, add all listening ports not defined in the devfile.
+        // not excluded
+        // not ephemeral
+
+
+        privateEndpoints.sort((ep1: Endpoint, ep2: Endpoint) => {
+            return ep1.name.localeCompare(ep2.name);
         })
-        
-        offlinePorts.forEach(offlinePort => {
+        privateEndpoints.forEach(endpoint => {
 
-        const portNotListeningButDeclaredNode: ITreeNodeItem = {
-            id: this.getRandId(),
-            name: `Port ${offlinePort.portNumber} (${offlinePort.serverName})`,
-            iconPath: 'fa-circle-thin medium-grey',
-        tooltip : 'This port is declared as public but it is not yet listening',
-        parentId : offlineEndpointsGroup.id}
+            let redirectName = `${endpoint.name} (${endpoint.targetPort}/${endpoint.protocol})`;
+            const privateEndpointNode: ITreeNodeItem = {
+                id: this.getRandId(),
+                name: `${redirectName}`
+            };
+            const isOnline = openedPorts.some(listeningPort => listeningPort.portNumber === endpoint.targetPort);
+            if (isOnline) {
+                privateEndpointNode.iconPath = 'fa-circle medium-green';
+                privateEndpointNode.tooltip = 'Private Port';
+                // user defined ?
+                if (endpoint.exposure === EndpointExposure.USER) {
+                    privateEndpointNode.contextValue = "privateUserPortOnline";
+                } else {
+                    privateEndpointNode.contextValue = "privateDevfilePortOnline";
+                }
+            } else {
+                privateEndpointNode.iconPath = 'fa-circle-thin medium-grey';
+                privateEndpointNode.tooltip = 'Private Port offline';
+                privateEndpointNode.contextValue = "privateDevfilePortOffline";
+            }
+            privateEndpointNode.parentId = privateEndpointsGroup.id;
 
-        this.treeNodeItems.push(portNotListeningButDeclaredNode);
-        
-    });
-    this.onDidChangeTreeDataEmitter.fire();
-    }
-
-
-    update() {
-
-
-        // create top level groups
-        const endpointsGroup = {
-            id: this.getRandId(),
-            iconPath: 'fa-plug',
-            name: 'Endpoints',
-            tooltip: 'Available Endpoints',
-            isExpanded: true
-        };
-        const publicEndpointsGroup = {
-            id: this.getRandId(),
-            iconPath: 'fa-cloud',
-            name: 'Ports listening and remotely available',
-            tooltip: 'Remotely available',
-            parentId: endpointsGroup.id,
-            isExpanded: true
-        };
-        const privateEndpointsGroup = {
-            id: this.getRandId(),
-            iconPath: 'fa-circle',
-            name: 'Ports listening but private',
-            parentId: endpointsGroup.id,
-            tooltip: 'Available locally',
-            isExpanded: true
-        };
-        const offlineEndpointsGroup = {
-            id: this.getRandId(),
-            iconPath: 'fa-circle-thin',
-            name: 'offline (declared in devfile but not listening)',
-            parentId: endpointsGroup.id,
-            tooltip: 'Declared but not listening',
-            isExpanded: true
-        };
+            // add endpoint inside the node
+            privateEndpointNode.endpoint = endpoint;
 
 
+            this.treeNodeItems.push(privateEndpointNode);
+        });
 
+        if (publicEndpoints.length > 0) {
+            this.treeNodeItems.push(publicEndpointsGroup);
+        }
 
-        const portListeningNode: ITreeNodeItem = {
-            id: this.getRandId(),
-            name: 'Port 3100',
-            tooltip: 'container name'
-        };
-        portListeningNode.iconPath = 'fa-cloud medium-green';
-        portListeningNode.tooltip = 'container is STARTING';
+        if (privateEndpoints.length > 0) {
+            this.treeNodeItems.push(privateEndpointsGroup);
+        }
 
-        portListeningNode.tooltip = 'This port is listening and is available remotely';
-        portListeningNode.parentId = publicEndpointsGroup.id;
-        portListeningNode.isExpanded = true;
-
-        // add links
-        const openNewTabNode: ITreeNodeItem = {
-            id: this.getRandId(),
-            parentId: portListeningNode.id,
-            name: 'Theia',
-            iconPath: 'fa-external-link medium-blue',
-            command: { id: 'theia.open', arguments: ['https://www.google.fr'] },
-            tooltip: 'open in a new tab  '
-        };
-
-        this.treeNodeItems.push(openNewTabNode);
-        const openPreviewTabNode: ITreeNodeItem = {
-            id: this.getRandId(),
-            parentId: portListeningNode.id,
-            name: 'Theia (preview)',
-            iconPath: 'fa-eye medium-blue',
-            command: { id: 'theia.open', arguments: ['https://www.google.fr?open-handler=code-editor-preview'] },
-            tooltip: 'open in preview  '
-        };
-        this.treeNodeItems.push(openPreviewTabNode);
-
-        this.treeNodeItems.push(portListeningNode);
-
-
-        this.treeNodeItems.push(endpointsGroup);
-
-
-        const portListeningPrivateNode: ITreeNodeItem = {
-            id: this.getRandId(),
-            name: 'Port 3200',
-            tooltip: 'container name'
-        };
-        portListeningPrivateNode.iconPath = 'fa-circle medium-green';
-        portListeningPrivateNode.tooltip = 'This port is listening but is not available remotely';
-        portListeningPrivateNode.parentId = privateEndpointsGroup.id;
-        portListeningPrivateNode.isExpanded = true;
-        this.treeNodeItems.push(portListeningPrivateNode);
-        const makeItPublicNode: ITreeNodeItem = {
-            id: this.getRandId(),
-            parentId: portListeningPrivateNode.id,
-            name: 'Make it public 🌐',
-            iconPath: 'fa-cloud medium-blue',
-            tooltip: 'Make this port available remotely',
-        };
-        this.treeNodeItems.push(makeItPublicNode);
-
-        const portNotListeningButDeclaredNode: ITreeNodeItem = {
-            id: this.getRandId(),
-            name: 'Port 3300',
-            tooltip: 'container name'
-        };
-        portNotListeningButDeclaredNode.iconPath = 'fa-circle-thin medium-grey';
-        portNotListeningButDeclaredNode.tooltip = 'This port is declared as public but it is not yet listening';
-        portNotListeningButDeclaredNode.parentId = offlineEndpointsGroup.id;
-        this.treeNodeItems.push(portNotListeningButDeclaredNode);
+        this.onDidChangeTreeDataEmitter.fire();
     }
 
 
@@ -329,7 +168,6 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<ITreeNo
 
 
     getChildren(element?: ITreeNodeItem | undefined): theia.ProviderResult<ITreeNodeItem[]> {
-        console.log('asked to get all children');
         if (element) {
             return this.treeNodeItems.filter(item => item.parentId === element.id);
         } else {
@@ -354,6 +192,9 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<ITreeNo
         }
         if (element.command) {
             treeItem.command = element.command;
+        }
+        if (element.contextValue) {
+            treeItem.contextValue = element.contextValue;
         }
         return treeItem;
     }
