@@ -73,7 +73,7 @@ export class PortChangesDetector {
 
     }
 
-    public getOpenedPorts() : ListeningPort[] {
+    public getOpenedPorts(): ListeningPort[] {
         return this.openedPorts;
     }
 

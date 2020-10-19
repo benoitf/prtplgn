@@ -1,151 +1,183 @@
+/*********************************************************************
+ * Copyright (c) 2020 Red Hat, Inc.
+ *
+ * This program and the accompanying materials are made
+ * available under the terms of the Eclipse Public License 2.0
+ * which is available at https://www.eclipse.org/legal/epl-2.0/
+ *
+ * SPDX-License-Identifier: EPL-2.0
+ **********************************************************************/
+
 import * as theia from '@theia/plugin';
-import { Endpoint, EndpointExposure } from './endpoint';
+import { Endpoint } from './endpoint';
+import { EndpointCategory } from './endpoint-category';
+import { EndpointExposure } from './endpoint-exposure';
 import { ListeningPort } from './listening-port';
 
-export interface ITreeNodeItem {
-    id: string;
-    name: string;
-    tooltip?: string;
-    iconPath?: string;
-    parentId?: string;
-    command?: {
-        id: string;
-        arguments?: any[]
-    },
-    isExpanded?: boolean;
-    contextValue?: string;
+// available context values used in package.json to assign context menus
+export type EndpointTreeNodeItemContext = 'publicHttpsEndpointOnline' | 'publicPortOnline' | 'publicDevfilePortOffline'
+    | 'privateUserPortOnline' | 'privateDevfilePortOnline' | 'privateDevfilePortOffline';
+
+// defines a custom item by adding the endpoint and parent id.
+export interface EndpointTreeNodeItem extends theia.TreeItem {
     endpoint?: Endpoint;
+    parentId?: string;
+    // make id and label mandatory
+    id: string;
+    label: string;
 }
 
-
-export class EndpointsTreeDataProvider implements theia.TreeDataProvider<ITreeNodeItem> {
+export class EndpointsTreeDataProvider implements theia.TreeDataProvider<EndpointTreeNodeItem> {
 
     private onDidChangeTreeDataEmitter: theia.EventEmitter<undefined>;
     private ids: string[];
     readonly onDidChangeTreeData: theia.Event<undefined>;
-    private treeNodeItems: ITreeNodeItem[];
+    private treeNodeItems: EndpointTreeNodeItem[];
+    private showPluginEndpoints: boolean;
+    private currentEndpoints: Endpoint[];
+    private openedPorts: ListeningPort[];
+    private treeId: number;
 
     constructor() {
+        this.treeId = 0;
         this.treeNodeItems = [];
+        this.currentEndpoints = [];
+        this.openedPorts = [];
         this.onDidChangeTreeDataEmitter = new theia.EventEmitter<undefined>();
         this.onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
         this.ids = [];
+        // do not show plugin endpoints by default
+        this.showPluginEndpoints = false;
     }
 
+    // Register commands and init context
+    async init(context: theia.PluginContext): Promise<void> {
+        context.subscriptions.push(theia.commands.registerCommand('portPlugin.filterInPlugins', async () => {
+            this.showPluginEndpoints = true;
+            await this.updateContext();
+        }));
+        context.subscriptions.push(theia.commands.registerCommand('portPlugin.filterOutPlugins', async () => {
+            this.showPluginEndpoints = false;
+            await this.updateContext();
+        }));
+        // initialize context
+        await this.updateContext();
+    }
 
-    refresh(endpoints: Endpoint[], openedPorts: ListeningPort[]) {
+    // update global context (like toggle mode for showing plugins)
+    async updateContext(): Promise<void> {
+        await theia.commands.executeCommand('setContext', 'portPluginShowPlugins', this.showPluginEndpoints);
+    }
+
+    // Update the endpoints from ports-plugin
+    async updateEndpoints(currentEndpoints: Endpoint[], openedPorts: ListeningPort[]): Promise<void> {
+        this.currentEndpoints = currentEndpoints;
+        this.openedPorts = openedPorts;
+        this.refresh();
+    }
+
+    // helper method to know if a port is online or not
+    isOnline(portNumber: number): boolean {
+        return this.openedPorts.some(listeningPort => listeningPort.portNumber === portNumber);
+    }
+
+    // Create a new node item
+    createEndpointTreeNodeItem(label: string, parentId: string, endpoint: Endpoint): EndpointTreeNodeItem {
+        return {
+            id: this.getNextId(),
+            label,
+            parentId,
+            endpoint,
+        };
+    }
+
+    async refresh(): Promise<void> {
+
+        let filteredEndpoints = [... this.currentEndpoints];
+        if (!this.showPluginEndpoints) {
+            filteredEndpoints = filteredEndpoints.filter(endpoint => endpoint.category === EndpointCategory.USER);
+        }
+
         this.ids.length = 0;
         this.treeNodeItems.length = 0;
 
-        const publicEndpointsGroup = {
-            id: this.getRandId(),
-            name: 'Public',
+        const publicEndpointsGroup: EndpointTreeNodeItem = {
+            id: this.getNextId(),
+            label: 'Public',
             iconPath: 'fa-cloud',
             tooltip: 'Public endpoints referenced in the devfile',
-            isExpanded: true
-        };
-        const privateEndpointsGroup = {
-            id: this.getRandId(),
-            iconPath: 'fa-circle',
-            name: 'Private',
-            tooltip: 'Private endpoints (only available within workspace)',
-            isExpanded: true
+            collapsibleState: theia.TreeItemCollapsibleState.Expanded,
         };
 
+        const privateEndpointsGroup: EndpointTreeNodeItem = {
+            id: this.getNextId(),
+            iconPath: 'fa-circle',
+            label: 'Private',
+            tooltip: 'Private endpoints (only available within workspace)',
+            collapsibleState: theia.TreeItemCollapsibleState.Expanded,
+        };
 
         // public endpoints are:
-        //  - the one defined in the devfile 
+        //  - the one defined in the devfile
         //  - and the current port forwarding
-        const publicEndpoints: Endpoint[] = endpoints.filter(endpoint => endpoint.exposure === EndpointExposure.DEVFILE_PUBLIC || endpoint.exposure === EndpointExposure.PORT_FORWARDING);
-
-
-        publicEndpoints.sort((ep1: Endpoint, ep2: Endpoint) => {
-            return ep1.name.localeCompare(ep2.name);
-        })
-
+        const publicEndpoints: Endpoint[] = filteredEndpoints.filter(endpoint => endpoint.exposure === EndpointExposure.FROM_DEVFILE_PUBLIC
+            || endpoint.exposure === EndpointExposure.FROM_RUNTIME_PORT_FORWARDING);
         publicEndpoints.forEach(endpoint => {
-
-            let targetPort = endpoint.targetPort;
-            let displayName;
-            if (endpoint.exposure === EndpointExposure.PORT_FORWARDING) {
-                displayName = endpoint.name;
+            const targetPort = endpoint.targetPort;
+            let label;
+            if (endpoint.exposure === EndpointExposure.FROM_RUNTIME_PORT_FORWARDING) {
+                label = endpoint.name;
             } else {
-                displayName = `${endpoint.name} (${targetPort}/${endpoint.protocol})`;
+                label = `${endpoint.name} (${targetPort}/${endpoint.protocol})`;
             }
-
-            const publicEndpointNode: ITreeNodeItem = {
-                id: this.getRandId(),
-                name: displayName
-            };
-            const isOnline = openedPorts.some(listeningPort => listeningPort.portNumber === targetPort);
-            if (isOnline) {
+            const publicEndpointNode = this.createEndpointTreeNodeItem(label, publicEndpointsGroup.id, endpoint);
+            if (this.isOnline(targetPort)) {
                 publicEndpointNode.iconPath = 'fa-cloud medium-green';
                 publicEndpointNode.tooltip = 'Public Port';
-                if (endpoint.url.startsWith('https://')) {
-                    publicEndpointNode.contextValue = "publicHttpsEndpointOnline";
+                if (endpoint.url && endpoint.url.startsWith('https://')) {
+                    publicEndpointNode.contextValue = 'publicHttpsEndpointOnline';
                 } else {
-                    publicEndpointNode.contextValue = "publicPortOnline";
+                    publicEndpointNode.contextValue = 'publicPortOnline';
                 }
             } else {
                 publicEndpointNode.iconPath = 'fa-circle-thin medium-grey';
                 publicEndpointNode.tooltip = 'Public Port offline';
-                publicEndpointNode.contextValue = "publicDevfilePortOffline";
+                publicEndpointNode.contextValue = 'publicDevfilePortOffline';
             }
-            publicEndpointNode.parentId = publicEndpointsGroup.id;
-
-            // add endpoint inside the node
-            publicEndpointNode.endpoint = endpoint;
-
-
             this.treeNodeItems.push(publicEndpointNode);
         });
-
-
-        const privateEndpoints: Endpoint[] = endpoints.filter(endpoint => (endpoint.exposure === EndpointExposure.DEVFILE_PRIVATE || endpoint.exposure === EndpointExposure.USER));
 
         // now, add all listening ports not defined in the devfile.
         // not excluded
         // not ephemeral
-
-
-        privateEndpoints.sort((ep1: Endpoint, ep2: Endpoint) => {
-            return ep1.name.localeCompare(ep2.name);
-        })
+        const privateEndpoints: Endpoint[] = filteredEndpoints.filter(endpoint => (endpoint.exposure === EndpointExposure.FROM_DEVFILE_PRIVATE
+            || endpoint.exposure === EndpointExposure.FROM_RUNTIME_USER));
         privateEndpoints.forEach(endpoint => {
-
-            let redirectName = `${endpoint.name} (${endpoint.targetPort}/${endpoint.protocol})`;
-            const privateEndpointNode: ITreeNodeItem = {
-                id: this.getRandId(),
-                name: `${redirectName}`
-            };
-            const isOnline = openedPorts.some(listeningPort => listeningPort.portNumber === endpoint.targetPort);
-            if (isOnline) {
+            const privateEndpointNode = this.createEndpointTreeNodeItem(`${endpoint.name} (${endpoint.targetPort}/${endpoint.protocol})`, privateEndpointsGroup.id, endpoint);
+            if (this.isOnline(endpoint.targetPort)) {
                 privateEndpointNode.iconPath = 'fa-circle medium-green';
                 privateEndpointNode.tooltip = 'Private Port';
                 // user defined ?
-                if (endpoint.exposure === EndpointExposure.USER) {
-                    privateEndpointNode.contextValue = "privateUserPortOnline";
+                if (endpoint.exposure === EndpointExposure.FROM_RUNTIME_USER) {
+                    privateEndpointNode.contextValue = 'privateUserPortOnline';
                 } else {
-                    privateEndpointNode.contextValue = "privateDevfilePortOnline";
+                    privateEndpointNode.contextValue = 'privateDevfilePortOnline';
                 }
             } else {
                 privateEndpointNode.iconPath = 'fa-circle-thin medium-grey';
                 privateEndpointNode.tooltip = 'Private Port offline';
-                privateEndpointNode.contextValue = "privateDevfilePortOffline";
+                privateEndpointNode.contextValue = 'privateDevfilePortOffline';
             }
-            privateEndpointNode.parentId = privateEndpointsGroup.id;
-
-            // add endpoint inside the node
-            privateEndpointNode.endpoint = endpoint;
-
-
             this.treeNodeItems.push(privateEndpointNode);
         });
 
+                // sort per labels
+                this.treeNodeItems.sort((item1: EndpointTreeNodeItem, item2: EndpointTreeNodeItem) => item1.label.localeCompare(item2.label));
+
+        // add the root elements only if there are elements to display
         if (publicEndpoints.length > 0) {
             this.treeNodeItems.push(publicEndpointsGroup);
         }
-
         if (privateEndpoints.length > 0) {
             this.treeNodeItems.push(privateEndpointsGroup);
         }
@@ -153,21 +185,11 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<ITreeNo
         this.onDidChangeTreeDataEmitter.fire();
     }
 
-
-    private getRandId(): string {
-        let uniqueId = '';
-        for (let counter = 0; counter < 1000; counter++) {
-            uniqueId = `${('0000' + (Math.random() * Math.pow(36, 4) << 0).toString(36)).slice(-4)}`;
-            if (this.ids.findIndex(id => id === uniqueId) === -1) {
-                break;
-            }
-        }
-        this.ids.push(uniqueId);
-        return uniqueId;
+    private getNextId(): string {
+        return `${this.treeId++}`;
     }
 
-
-    getChildren(element?: ITreeNodeItem | undefined): theia.ProviderResult<ITreeNodeItem[]> {
+    getChildren(element?: EndpointTreeNodeItem | undefined): theia.ProviderResult<EndpointTreeNodeItem[]> {
         if (element) {
             return this.treeNodeItems.filter(item => item.parentId === element.id);
         } else {
@@ -175,28 +197,8 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<ITreeNo
         }
     }
 
-    getTreeItem(element: ITreeNodeItem): theia.TreeItem {
-        const treeItem: theia.TreeItem = {
-            label: element.name,
-            tooltip: element.tooltip
-        };
-        if (element.isExpanded === true) {
-            treeItem.collapsibleState = theia.TreeItemCollapsibleState.Expanded;
-        } else if (element.isExpanded === false) {
-            treeItem.collapsibleState = theia.TreeItemCollapsibleState.Collapsed;
-        } else {
-            treeItem.collapsibleState = theia.TreeItemCollapsibleState.None;
-        }
-        if (element.iconPath) {
-            treeItem.iconPath = element.iconPath;
-        }
-        if (element.command) {
-            treeItem.command = element.command;
-        }
-        if (element.contextValue) {
-            treeItem.contextValue = element.contextValue;
-        }
-        return treeItem;
+    getTreeItem(element: EndpointTreeNodeItem): theia.TreeItem {
+        return element;
     }
 
     dispose(): void {
@@ -204,4 +206,3 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<ITreeNo
     }
 
 }
-

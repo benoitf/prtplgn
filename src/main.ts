@@ -11,7 +11,7 @@
 import * as theia from '@theia/plugin';
 import { PortsPlugin } from './ports-plugin';
 
-let portsPlugin : PortsPlugin | undefined;
+let portsPlugin: PortsPlugin | undefined;
 
 export async function start(context: theia.PluginContext): Promise<void> {
     portsPlugin = new PortsPlugin(context);

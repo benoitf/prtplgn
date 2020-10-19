@@ -11,10 +11,10 @@
 import * as net from 'net';
 
 /**
- * Allow to Listen on a port and redirect traffic.
+ * Allow to forward a port and redirect traffic.
  * @author Florent Benoit
  */
-export class PortRedirectListener {
+export class PortForwardServer {
 
     private server: net.Server | undefined;
 

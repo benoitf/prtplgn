@@ -1,5 +1,5 @@
 /*********************************************************************
- * Copyright (c) 2019 Red Hat, Inc.
+ * Copyright (c) 2019-2020 Red Hat, Inc.
  *
  * This program and the accompanying materials are made
  * available under the terms of the Eclipse Public License 2.0
@@ -11,11 +11,13 @@
 import * as theia from '@theia/plugin';
 import { PortChangesDetector } from './port-changes-detector';
 import { ListeningPort } from './listening-port';
-import { PortRedirectListener } from './port-redirect-listener';
-import { EndpointsTreeDataProvider, ITreeNodeItem } from './endpoints-tree-data-provider';
-import { Endpoint, EndpointExposure, EndpointCategory } from './endpoint';
+import { EndpointsTreeDataProvider, EndpointTreeNodeItem } from './endpoints-tree-data-provider';
+import { Endpoint } from './endpoint';
 import { CheServerDevfileHandlerImpl } from './devfile-handler-che-server-impl';
 import { DevfileHandler } from './devfile-handler';
+import { EndpointExposure } from './endpoint-exposure';
+import { EndpointCategory } from './endpoint-category';
+import { PortForwardServer } from './port-forward-server';
 
 /**
  * Plugin that is monitoring new port being opened and closed.
@@ -23,18 +25,13 @@ import { DevfileHandler } from './devfile-handler';
  * @author Florent Benoit
  */
 
-
 // map a listener and the endpoint port used
 export interface ForwardedPort {
 
-    portRedirectListener: PortRedirectListener;
+    portForwardServer: PortForwardServer;
 
     endpoint: Endpoint;
 
-}
-
-export interface MessageItem {
-    title: string;
 }
 
 export class PortsPlugin {
@@ -47,22 +44,18 @@ export class PortsPlugin {
 
     private devfileHandler: DevfileHandler;
     private devfileEndpoints: Endpoint[];
-    private currentEndpoints: Endpoint[];
     private redirectPorts: Endpoint[];
-    private redirectListeners: Map<number, ForwardedPort>;
+    private portForwards: Map<number, ForwardedPort>;
     private excludedPorts: number[];
     private outputChannel: theia.OutputChannel;
     private endpointsTreeDataProvider: EndpointsTreeDataProvider;
     private portChangesDetector: PortChangesDetector;
-    private showPluginEndpoints: boolean;
 
     constructor(private context: theia.PluginContext) {
         this.devfileEndpoints = [];
-        this.currentEndpoints = [];
         this.redirectPorts = [];
-        this.showPluginEndpoints = false;
         this.devfileHandler = new CheServerDevfileHandlerImpl();
-        this.redirectListeners = new Map();
+        this.portForwards = new Map();
         this.excludedPorts = [];
         this.endpointsTreeDataProvider = new EndpointsTreeDataProvider();
         this.portChangesDetector = new PortChangesDetector();
@@ -83,32 +76,32 @@ export class PortsPlugin {
             return;
         }
 
-        const interactions: MessageItem[] = [{ title: 'yes' }, { title: 'no' }];
+        const interactions: theia.MessageItem[] = [{ title: 'yes' }, { title: 'no' }];
         const result = await theia.window.showInformationMessage(redirectMessage, ...interactions);
         if (result && result.title === 'yes') {
             // takes first available port
             const endpoint = this.redirectPorts.pop()!;
 
-            // start a new listener
-            const portRedirectListener = new PortRedirectListener(endpoint.targetPort, 'localhost', port.portNumber);
-            portRedirectListener.start();
+            // start a new server for port forwarding
+            const portForwardServer = new PortForwardServer(endpoint.targetPort, 'localhost', port.portNumber);
+            portForwardServer.start();
 
             // store port taken
-            const forwardedPort = { portRedirectListener, endpoint };
-            this.redirectListeners.set(port.portNumber, forwardedPort);
+            const forwardedPort = { portForwardServer, endpoint };
+            this.portForwards.set(port.portNumber, forwardedPort);
             this.updateEndpoints();
 
             // show redirect
-            const redirectInteractions: MessageItem[] = [{ title: 'Open In New Tab' }];
+            const redirectInteractions: theia.MessageItem[] = [{ title: 'Open In New Tab' }];
             if (endpoint.protocol === 'https') {
-                redirectInteractions.push({ title: 'Open In Preview' });
+                redirectInteractions.push({ title: 'Open Link' });
             }
-            const msg = `Redirect is now enabled on port ${port.portNumber}.`;
+            const msg = `Redirect is now enabled on port ${port.portNumber}. External URL is ${endpoint.url}`;
             const resultShow = await theia.window.showInformationMessage(msg, ...redirectInteractions);
-            if (resultShow && resultShow.title === 'Open In New Tab') {
-                theia.commands.executeCommand('theia.open', endpoint.url);
-            } else if (resultShow && resultShow.title === 'Open In Preview') {
+            if (resultShow && resultShow.title === 'Open Link') {
                 theia.commands.executeCommand('mini-browser.openUrl', endpoint.url);
+            } else if (resultShow && resultShow.title === 'Open In New Tab') {
+                theia.commands.executeCommand('theia.open', endpoint.url);
             }
         }
     }
@@ -116,50 +109,45 @@ export class PortsPlugin {
     async updateEndpoints(): Promise<void> {
 
         // first, start with current devfile endpoints (copying them)
-        this.currentEndpoints = [...this.devfileEndpoints];
+        const currentEndpoints = [...this.devfileEndpoints];
 
         // Add new forwarded endpoint on matching devfile
         // override public endpoint that are redirect with a Port Forward name
-        this.currentEndpoints.filter(endpoint => endpoint.exposure === EndpointExposure.DEVFILE_PUBLIC).forEach(publicEndpoint => {
-            Array.from(this.redirectListeners.keys()).forEach(redirectPort => {
-                const forwardedPort = this.redirectListeners.get(redirectPort);
+        currentEndpoints.filter(endpoint => endpoint.exposure === EndpointExposure.FROM_DEVFILE_PUBLIC).forEach(publicEndpoint => {
+            Array.from(this.portForwards.keys()).forEach(redirectPort => {
+                const forwardedPort = this.portForwards.get(redirectPort);
                 if (forwardedPort && forwardedPort.endpoint.targetPort === publicEndpoint.targetPort) {
                     const portForwardEndpoint = { ...publicEndpoint };
                     portForwardEndpoint.name = `user-port-forward (${redirectPort})`;
-                    portForwardEndpoint.exposure = EndpointExposure.PORT_FORWARDING;
+                    portForwardEndpoint.exposure = EndpointExposure.FROM_RUNTIME_PORT_FORWARDING;
                     portForwardEndpoint.targetPort = redirectPort;
                     portForwardEndpoint.category = EndpointCategory.USER;
-                    this.currentEndpoints.push(portForwardEndpoint)
+                    currentEndpoints.push(portForwardEndpoint);
                 }
-            })
+            });
         });
 
         // and then, we need to add all ports not defined in the devfile
         const listeningPorts = this.portChangesDetector.getOpenedPorts();
         listeningPorts.forEach(listeningPort => {
-            const existInDevfile = this.currentEndpoints.some(endpoint => endpoint.targetPort === listeningPort.portNumber);
+            const existInDevfile = currentEndpoints.some(endpoint => endpoint.targetPort === listeningPort.portNumber);
             if (!existInDevfile) {
                 // need to add it as a custom user endpoint
                 const endpoint: Endpoint = {
                     name: 'user',
-                    exposure: EndpointExposure.USER,
+                    exposure: EndpointExposure.FROM_RUNTIME_USER,
                     url: 'N/A',
                     protocol: 'unknown',
                     targetPort: listeningPort.portNumber,
                     category: EndpointCategory.USER
-                }
-                this.currentEndpoints.push(endpoint);
+                };
+                currentEndpoints.push(endpoint);
             }
-        })
+        });
 
-        if (!this.showPluginEndpoints) {
-            this.currentEndpoints = this.currentEndpoints.filter(endpoint => endpoint.category === EndpointCategory.USER);
-        }
-
-        // refresh the tree data provider
-        this.endpointsTreeDataProvider.refresh(this.currentEndpoints, listeningPorts);
+        // update the endpoints on the tree data provider
+        this.endpointsTreeDataProvider.updateEndpoints(currentEndpoints, listeningPorts);
     }
-
 
     // Callback when a new port is being opened in workspace
     async onOpenPort(port: ListeningPort): Promise<void> {
@@ -178,6 +166,13 @@ export class PortsPlugin {
             this.outputChannel.appendLine(`Ephemeral port now listening on port ${port.portNumber} (port range >= 32000). No redirect proposed for ephemerals.`);
             return;
         }
+        // check now if the port is in workspace definition ?
+        const matchingEndpoint = this.devfileEndpoints.find(endpoint => endpoint.targetPort === port.portNumber);
+
+        if (matchingEndpoint && matchingEndpoint.exposure === EndpointExposure.FROM_DEVFILE_PRIVATE) {
+            this.outputChannel.appendLine(`Endpoint ${matchingEndpoint.name} on port ${matchingEndpoint.targetPort} is defined as Private. Do not prompt to open it.`);
+            return;
+        }
 
         // if not listening on 0.0.0.0 then raise a prompt to add a port redirect
         if (port.interfaceListen !== PortsPlugin.LISTEN_ALL_IPV4 && port.interfaceListen !== PortsPlugin.LISTEN_ALL_IPV6) {
@@ -188,9 +183,6 @@ export class PortsPlugin {
             await this.askRedirect(port, desc, err);
             return;
         }
-
-        // check now if the port is in workspace definition ?
-        const matchingEndpoint = this.devfileEndpoints.find(endpoint => endpoint.targetPort === port.portNumber);
 
         // if there, show prompt
         if (matchingEndpoint) {
@@ -205,9 +197,8 @@ export class PortsPlugin {
                 return;
             }
 
-            //
-
-            const interactions: MessageItem[] = [{ title: 'Open In New Tab' }];
+            // open notification ?
+            const interactions: theia.MessageItem[] = [{ title: 'Open In New Tab' }];
             if (matchingEndpoint.protocol === 'https') {
                 interactions.push({ title: 'Open In Preview' });
             }
@@ -232,21 +223,21 @@ export class PortsPlugin {
     async freeRedirectPort(portNumber: number): Promise<void> {
 
         // stop the redirect
-        const forwardedPort = this.redirectListeners.get(portNumber)!;
-        forwardedPort.portRedirectListener.stop();
+        const forwardedPort = this.portForwards.get(portNumber)!;
+        forwardedPort.portForwardServer.stop();
 
         // free up the redirect endpoint
         this.redirectPorts.push(forwardedPort.endpoint);
 
         // remove entry
-        this.redirectListeners.delete(portNumber);
+        this.portForwards.delete(portNumber);
     }
 
     onClosedPort(port: ListeningPort): void {
 
         // free redirect listener if there is one
         const portNumber = port.portNumber;
-        if (this.redirectListeners.has(portNumber)) {
+        if (this.portForwards.has(portNumber)) {
             this.freeRedirectPort(portNumber);
         }
         this.updateEndpoints();
@@ -255,15 +246,14 @@ export class PortsPlugin {
         console.info(`The port ${port.portNumber} is no longer listening on interface ${port.interfaceListen}`);
     }
 
-
     async registerCommands(): Promise<void> {
         // register commands
-        const openTab = theia.commands.registerCommand('portPlugin.openNewTabPort', (node: ITreeNodeItem) => {
+        const openTab = theia.commands.registerCommand('portPlugin.openNewTabPort', (node: EndpointTreeNodeItem) => {
             if (node.endpoint && node.endpoint.url) {
                 theia.commands.executeCommand('theia.open', node.endpoint.url);
             }
         });
-        const previewCommand = theia.commands.registerCommand('portPlugin.preview', (node: ITreeNodeItem) => {
+        const previewCommand = theia.commands.registerCommand('portPlugin.preview', (node: EndpointTreeNodeItem) => {
             if (node.endpoint && node.endpoint.url) {
                 theia.commands.executeCommand('mini-browser.openUrl', node.endpoint.url);
             }
@@ -276,12 +266,9 @@ export class PortsPlugin {
 
         this.registerCommands();
 
-        // default mode
-        await theia.commands.executeCommand('setContext', 'portPluginShowPlugins', this.showPluginEndpoints);
-
         // initiate excluded ports
-        const excludedPortProperties: string[] = Object.keys(process.env).filter(key => key.startsWith(PortsPlugin.PORT_EXCLUDE_ENV_VAR_PREFIX));
-        excludedPortProperties.forEach(key => {
+        const excludedPortEnvironmentVariables: string[] = Object.keys(process.env).filter(key => key.startsWith(PortsPlugin.PORT_EXCLUDE_ENV_VAR_PREFIX));
+        excludedPortEnvironmentVariables.forEach(key => {
             const value = process.env[key]!.toLocaleLowerCase() || '';
             if (value !== 'no' && value !== 'false') {
                 this.excludedPorts.push(parseInt(key.substring(PortsPlugin.PORT_EXCLUDE_ENV_VAR_PREFIX.length)));
@@ -292,47 +279,26 @@ export class PortsPlugin {
         this.devfileHandler = new CheServerDevfileHandlerImpl();
         this.devfileEndpoints = await this.devfileHandler.getEndpoints();
 
-
         this.redirectPorts = this.devfileEndpoints.filter(endpoint => endpoint.name.startsWith(PortsPlugin.SERVER_REDIRECT_PATTERN));
 
-        this.portChangesDetector.onDidOpenPort(async (port) => {
-            return this.onOpenPort(port)
-        });
-        this.portChangesDetector.onDidClosePort(async (port) => {
-            return this.onClosedPort(port)
-        });
+        this.portChangesDetector.onDidOpenPort(async port => this.onOpenPort(port));
+        this.portChangesDetector.onDidClosePort(async port => this.onClosedPort(port));
 
         // start port changes
         await this.portChangesDetector.init();
         this.portChangesDetector.check();
 
+        // init
+        await this.endpointsTreeDataProvider.init(this.context);
         // custom view
         const endpointsTreeDataProviderDisposable = theia.Disposable.create(() => {
             this.endpointsTreeDataProvider.dispose();
         });
         this.context.subscriptions.push(endpointsTreeDataProviderDisposable);
-        const treeView = theia.window.createTreeView('endpoints', { treeDataProvider: this.endpointsTreeDataProvider });
+        theia.window.createTreeView('endpoints', { treeDataProvider: this.endpointsTreeDataProvider });
 
         this.updateEndpoints();
-
-
-        theia.commands.registerCommand('portPlugin.filterInPlugins', async (node: ITreeNodeItem) => {
-            treeView.title = 'W/ plugins';
-            this.showPluginEndpoints = true;
-            this.updateContext();
-        });
-        theia.commands.registerCommand('portPlugin.filterOutPlugins', async (node: ITreeNodeItem) => {
-            treeView.title = 'W/O plugins';
-            this.showPluginEndpoints = false;
-            this.updateContext();
-        });
     }
-
-    async updateContext(): Promise<void> {
-        await theia.commands.executeCommand('setContext', 'portPluginShowPlugins', this.showPluginEndpoints);
-        this.updateEndpoints();
-    }
-
 
     async stop(): Promise<void> {
 
