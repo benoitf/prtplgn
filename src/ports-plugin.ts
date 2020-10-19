@@ -290,12 +290,6 @@ export class PortsPlugin {
 
         // init
         await this.endpointsTreeDataProvider.init(this.context);
-        // custom view
-        const endpointsTreeDataProviderDisposable = theia.Disposable.create(() => {
-            this.endpointsTreeDataProvider.dispose();
-        });
-        this.context.subscriptions.push(endpointsTreeDataProviderDisposable);
-        theia.window.createTreeView('endpoints', { treeDataProvider: this.endpointsTreeDataProvider });
 
         this.updateEndpoints();
     }

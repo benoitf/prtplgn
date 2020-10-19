@@ -37,6 +37,7 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
     private currentEndpoints: Endpoint[];
     private openedPorts: ListeningPort[];
     private treeId: number;
+    private treeView: theia.TreeView<EndpointTreeNodeItem>;
 
     constructor() {
         this.treeId = 0;
@@ -52,12 +53,21 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
 
     // Register commands and init context
     async init(context: theia.PluginContext): Promise<void> {
+        // custom view
+        const endpointsTreeDataProviderDisposable = theia.Disposable.create(() => {
+            this.dispose();
+        });
+        context.subscriptions.push(endpointsTreeDataProviderDisposable);
+        this.treeView = theia.window.createTreeView('endpoints', { treeDataProvider: this });
+
         context.subscriptions.push(theia.commands.registerCommand('portPlugin.filterInPlugins', async () => {
             this.showPluginEndpoints = true;
+            this.treeView.title = 'show plugins';
             await this.updateContext();
         }));
         context.subscriptions.push(theia.commands.registerCommand('portPlugin.filterOutPlugins', async () => {
             this.showPluginEndpoints = false;
+            this.treeView.title = 'hide plugins';
             await this.updateContext();
         }));
         // initialize context
@@ -171,8 +181,8 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
             this.treeNodeItems.push(privateEndpointNode);
         });
 
-                // sort per labels
-                this.treeNodeItems.sort((item1: EndpointTreeNodeItem, item2: EndpointTreeNodeItem) => item1.label.localeCompare(item2.label));
+        // sort per labels
+        this.treeNodeItems.sort((item1: EndpointTreeNodeItem, item2: EndpointTreeNodeItem) => item1.label.localeCompare(item2.label));
 
         // add the root elements only if there are elements to display
         if (publicEndpoints.length > 0) {
