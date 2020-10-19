@@ -11,7 +11,7 @@
 import * as theia from '@theia/plugin';
 import { PortChangesDetector } from './port-changes-detector';
 import { ListeningPort } from './listening-port';
-import { EndpointsTreeDataProvider, EndpointTreeNodeItem } from './endpoints-tree-data-provider';
+import { EndpointsTreeDataProvider } from './endpoints-tree-data-provider';
 import { Endpoint } from './endpoint';
 import { CheServerDevfileHandlerImpl } from './devfile-handler-che-server-impl';
 import { DevfileHandler } from './devfile-handler';
@@ -246,27 +246,9 @@ export class PortsPlugin {
         console.info(`The port ${port.portNumber} is no longer listening on interface ${port.interfaceListen}`);
     }
 
-    async registerCommands(): Promise<void> {
-        // register commands
-        const openTab = theia.commands.registerCommand('portPlugin.openNewTabPort', (node: EndpointTreeNodeItem) => {
-            if (node.endpoint && node.endpoint.url) {
-                theia.commands.executeCommand('theia.open', node.endpoint.url);
-            }
-        });
-        const previewCommand = theia.commands.registerCommand('portPlugin.preview', (node: EndpointTreeNodeItem) => {
-            if (node.endpoint && node.endpoint.url) {
-                theia.commands.executeCommand('mini-browser.openUrl', node.endpoint.url);
-            }
-        });
+       async start(): Promise<void> {
 
-        this.context.subscriptions.push(openTab, previewCommand);
-    }
-
-    async start(): Promise<void> {
-
-        this.registerCommands();
-
-        // initiate excluded ports
+           // initiate excluded ports
         const excludedPortEnvironmentVariables: string[] = Object.keys(process.env).filter(key => key.startsWith(PortsPlugin.PORT_EXCLUDE_ENV_VAR_PREFIX));
         excludedPortEnvironmentVariables.forEach(key => {
             const value = process.env[key]!.toLocaleLowerCase() || '';

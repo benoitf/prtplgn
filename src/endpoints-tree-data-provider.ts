@@ -15,7 +15,7 @@ import { EndpointExposure } from './endpoint-exposure';
 import { ListeningPort } from './listening-port';
 
 // available context values used in package.json to assign context menus
-export type EndpointTreeNodeItemContext = 'publicHttpsEndpointOnline' | 'publicPortOnline' | 'publicDevfilePortOffline'
+export type EndpointTreeNodeItemContext = 'publicHttpsEndpointOnline' | 'publicHttpPortOnline' | 'publicPortOnline' | 'publicDevfilePortOffline'
     | 'privateUserPortOnline' | 'privateDevfilePortOnline' | 'privateDevfilePortOffline';
 
 // defines a custom item by adding the endpoint and parent id.
@@ -65,6 +65,23 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
         context.subscriptions.push(theia.commands.registerCommand('portPlugin.filterOutPlugins', async () => {
             this.updateContext(treeView, false);
         }));
+
+        context.subscriptions.push(theia.commands.registerCommand('portPlugin.openNewTabPort', (node: EndpointTreeNodeItem) => {
+            if (node.endpoint && node.endpoint.url) {
+                theia.env.openExternal(theia.Uri.parse(node.endpoint.url.toString()));
+            }
+        }));
+        context.subscriptions.push(theia.commands.registerCommand('portPlugin.copyClipBoardUrl', async (node: EndpointTreeNodeItem) => {
+            if (node.endpoint && node.endpoint.url) {
+                await theia.env.clipboard.writeText(node.endpoint.url);
+            }
+        }));
+        context.subscriptions.push(theia.commands.registerCommand('portPlugin.preview', (node: EndpointTreeNodeItem) => {
+            if (node.endpoint && node.endpoint.url) {
+                theia.commands.executeCommand('mini-browser.openUrl', node.endpoint.url);
+            }
+        }));
+
         // initialize context
         this.updateContext(treeView, false);
     }
@@ -72,9 +89,11 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
     // update global context (like toggle mode for showing plugins)
     async updateContext(treeView: theia.TreeView<EndpointTreeNodeItem>, showPluginEndpoints: boolean): Promise<void> {
         this.showPluginEndpoints = showPluginEndpoints;
-        treeView.title = showPluginEndpoints.toString().replace(/^[a-zA-Z]+/g, 'A');
+        // change context for the toggle icon
         theia.commands.executeCommand('setContext', 'portPluginShowPlugins', this.showPluginEndpoints);
+        // refresh tree
         this.refresh();
+        treeView.title = showPluginEndpoints.toString().replace(/[a-zA-Z]/g, ' ');
     }
 
     // Update the endpoints from ports-plugin
@@ -144,6 +163,8 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
                 publicEndpointNode.tooltip = 'Public Port';
                 if (endpoint.url && endpoint.url.startsWith('https://')) {
                     publicEndpointNode.contextValue = 'publicHttpsEndpointOnline';
+                } else if (endpoint.url && endpoint.url.startsWith('http://')) {
+                    publicEndpointNode.contextValue = 'publicHttpEndpointOnline';
                 } else {
                     publicEndpointNode.contextValue = 'publicPortOnline';
                 }
