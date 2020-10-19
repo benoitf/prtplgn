@@ -284,12 +284,12 @@ export class PortsPlugin {
         this.portChangesDetector.onDidOpenPort(async port => this.onOpenPort(port));
         this.portChangesDetector.onDidClosePort(async port => this.onClosedPort(port));
 
+        // init
+        await this.endpointsTreeDataProvider.init(this.context);
+
         // start port changes
         await this.portChangesDetector.init();
         this.portChangesDetector.check();
-
-        // init
-        await this.endpointsTreeDataProvider.init(this.context);
 
         this.updateEndpoints();
     }

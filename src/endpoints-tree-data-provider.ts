@@ -37,7 +37,6 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
     private currentEndpoints: Endpoint[];
     private openedPorts: ListeningPort[];
     private treeId: number;
-    private treeView: theia.TreeView<EndpointTreeNodeItem>;
 
     constructor() {
         this.treeId = 0;
@@ -58,25 +57,24 @@ export class EndpointsTreeDataProvider implements theia.TreeDataProvider<Endpoin
             this.dispose();
         });
         context.subscriptions.push(endpointsTreeDataProviderDisposable);
-        this.treeView = theia.window.createTreeView('endpoints', { treeDataProvider: this });
+        const treeView = theia.window.createTreeView('endpoints', { treeDataProvider: this });
 
         context.subscriptions.push(theia.commands.registerCommand('portPlugin.filterInPlugins', async () => {
-            this.showPluginEndpoints = true;
-            this.treeView.title = 'show plugins';
-            await this.updateContext();
+            this.updateContext(treeView, true);
         }));
         context.subscriptions.push(theia.commands.registerCommand('portPlugin.filterOutPlugins', async () => {
-            this.showPluginEndpoints = false;
-            this.treeView.title = 'hide plugins';
-            await this.updateContext();
+            this.updateContext(treeView, false);
         }));
         // initialize context
-        await this.updateContext();
+        this.updateContext(treeView, false);
     }
 
     // update global context (like toggle mode for showing plugins)
-    async updateContext(): Promise<void> {
-        await theia.commands.executeCommand('setContext', 'portPluginShowPlugins', this.showPluginEndpoints);
+    async updateContext(treeView: theia.TreeView<EndpointTreeNodeItem>, showPluginEndpoints: boolean): Promise<void> {
+        this.showPluginEndpoints = showPluginEndpoints;
+        treeView.title = showPluginEndpoints.toString().replace(/^[a-zA-Z]+/g, 'A');
+        theia.commands.executeCommand('setContext', 'portPluginShowPlugins', this.showPluginEndpoints);
+        this.refresh();
     }
 
     // Update the endpoints from ports-plugin
